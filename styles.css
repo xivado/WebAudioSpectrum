@@ -1,0 +1,225 @@
+:root {
+  color-scheme: light;
+  --page: #f3f5f7;
+  --panel: #ffffff;
+  --ink: #1c2530;
+  --muted: #6b7683;
+  --line: #d9e0e6;
+  --btn: #ffffff;
+  --btn-ink: #26313c;
+  --accent: #0b7fab;
+  --accent-ink: #ffffff;
+  --start: #178a4c;
+  --stop: #c53b3b;
+  --error: #b42318;
+  --shadow: 0 1px 3px rgba(16, 24, 40, 0.09);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --page: #0e1319;
+    --panel: #151d25;
+    --ink: #e7edf3;
+    --muted: #9aa6b2;
+    --line: #2b3743;
+    --btn: #1b2530;
+    --btn-ink: #dfe7ee;
+    --accent: #2389b3;
+    --start: #1f9d57;
+    --stop: #d24b4b;
+    --error: #ff8b7a;
+    --shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 20px 16px 36px;
+  background: var(--page);
+  color: var(--ink);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  line-height: 1.45;
+}
+
+.main-container {
+  max-width: 1080px;
+  margin: 0 auto;
+}
+
+h1 {
+  margin: 0 0 4px;
+  font-size: 1.3rem;
+  letter-spacing: -0.01em;
+}
+
+.subtitle {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+button {
+  font: inherit;
+  font-size: 0.84rem;
+  line-height: 1.2;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--btn);
+  color: var(--btn-ink);
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+  transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.05s ease;
+}
+
+button:hover {
+  border-color: var(--accent);
+}
+
+button:active {
+  transform: translateY(1px);
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+button.primary {
+  background: var(--start);
+  border-color: var(--start);
+  color: #fff;
+}
+
+button.primary.stop {
+  background: var(--stop);
+  border-color: var(--stop);
+}
+
+button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+.status {
+  min-height: 1.3em;
+  margin: 2px 0 14px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.status.error {
+  color: var(--error);
+}
+
+.panel {
+  margin-bottom: 10px;
+  padding: 10px 12px 12px;
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.panel-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+  margin-bottom: 6px;
+}
+
+.panel-title {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.panel-note {
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+#oscilloscopePanel {
+  display: none;
+}
+
+#oscilloscopePanel.show {
+  display: block;
+}
+
+canvas {
+  display: block;
+  width: 100%;
+  border-radius: 8px;
+  background: #000;
+}
+
+#oscilloscopeCanvas {
+  height: 150px;
+}
+
+#spectrumCanvas {
+  height: 210px;
+}
+
+#spectrogramCanvas {
+  height: 190px;
+}
+
+.footnote {
+  margin-top: 18px;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.footnote a {
+  color: var(--accent);
+}
+
+@media (max-width: 640px) {
+  body {
+    padding: 14px 10px 28px;
+  }
+
+  h1 {
+    font-size: 1.15rem;
+  }
+
+  button {
+    font-size: 0.78rem;
+    padding: 7px 10px;
+  }
+
+  #oscilloscopeCanvas {
+    height: 120px;
+  }
+
+  #spectrumCanvas {
+    height: 180px;
+  }
+
+  #spectrogramCanvas {
+    height: 160px;
+  }
+}

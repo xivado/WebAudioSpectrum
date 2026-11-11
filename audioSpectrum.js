@@ -1,686 +1,856 @@
-// This script is used to create a simple audio spectrum visualizer using the Web Audio API.
-// It creates a canvas element and draws the audio spectrum data on it in real-time.
-// The script also includes a button to start and stop the audio sampling and toggle the frequency scale.
+/*!
+ * audioSpectrum.js — microphone lifecycle and canvas rendering for
+ * WebAudioSpectrum. Depends on spectrum-dsp.js (window.SpectrumDSP).
+ *
+ * Design notes
+ * - One analysis path: every frame is windowed (or not) and FFT'd here, so the
+ *   "Window" toggle can never silently change the amplitude calibration.
+ * - Display calibration is dBFS: 0 dB = full scale, -90 dB = bottom of the plot.
+ * - Canvases are sized for devicePixelRatio (capped at 2) and re-fit on resize.
+ * - The spectrogram is rendered through ImageData at CSS resolution and scaled
+ *   with nearest-neighbour sampling; that keeps 100 frames x 1024 bins cheap.
+ */
+(function () {
+  'use strict';
 
-document.addEventListener('DOMContentLoaded', function () {
-    const btn = document.getElementById('toggle');
-    const scaleBtn = document.getElementById('toggleScale');
-    const windowBtn = document.getElementById('toggleWindow');
-    const oscilloscopeBtn = document.getElementById('toggleOscilloscope');
-    const oscilloscopeScaleBtn = document.getElementById('toggleOscilloscopeScale');
-    const canvas = document.getElementById('spectrumCanvas');
-    const ctx = canvas.getContext('2d');
-    const spectrogramCanvas = document.getElementById('spectrogramCanvas');
-    const spectrogramCtx = spectrogramCanvas.getContext('2d');
-    const oscilloscopeCanvas = document.getElementById('oscilloscopeCanvas');
-    const oscilloscopeCtx = oscilloscopeCanvas.getContext('2d');
-    const oscilloscopeContainer = document.getElementById('oscilloscopeContainer');
-    const oscilloscopeLabel = document.getElementById('oscilloscopeLabel');
-    const spectrumLabel = document.getElementById('spectrumLabel');
-    const spectrogramLabel = document.getElementById('spectrogramLabel');
-	const smoothBtn = document.getElementById('toggleSmooth');
-    
-    function resizeCanvases() {
-        canvas.width = canvas.offsetWidth;
-        canvas.height = canvas.offsetHeight;
-        spectrogramCanvas.width = spectrogramCanvas.offsetWidth;
-        spectrogramCanvas.height = spectrogramCanvas.offsetHeight;
-        oscilloscopeCanvas.width = oscilloscopeCanvas.offsetWidth;
-        oscilloscopeCanvas.height = oscilloscopeCanvas.offsetHeight;
+  var DSP = window.SpectrumDSP;
+  if (!DSP) {
+    console.error('[WebAudioSpectrum] spectrum-dsp.js must be loaded before audioSpectrum.js');
+    return;
+  }
+
+  var CONFIG = {
+    fftSize: 2048,
+    maxFrames: 100,
+    minDb: -90,
+    maxDb: 0,
+    smoothingAlpha: 0.8,
+    logMinFrequency: 20,
+    maxPixelRatio: 2,
+    decibelTicks: [0, -15, -30, -45, -60, -75, -90],
+    timeRows: 4
+  };
+
+  var LAYOUT = { left: 44, right: 12, top: 10, bottom: 20 };
+  var LOG_FREQUENCIES = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
+  var LABEL_FONT = '10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+  var HINT_FONT = '12px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
+  var MIN_LABEL_GAP = 38;
+
+  var LITTLE_ENDIAN = (function () {
+    var buffer = new ArrayBuffer(4);
+    new Uint32Array(buffer)[0] = 1;
+    return new Uint8Array(buffer)[0] === 1;
+  })();
+
+  var OPAQUE_BLACK = LITTLE_ENDIAN ? 0xff000000 : 0x000000ff;
+
+  // ------------------------------------------------------------------ DOM
+
+  function byId(name) {
+    return document.getElementById(name);
+  }
+
+  var el = {
+    toggle: byId('toggle'),
+    scopeToggle: byId('toggleOscilloscope'),
+    scopeScale: byId('toggleOscilloscopeScale'),
+    scale: byId('toggleScale'),
+    windowBtn: byId('toggleWindow'),
+    smooth: byId('toggleSmooth'),
+    status: byId('status'),
+    scopePanel: byId('oscilloscopePanel'),
+    scopeLabel: byId('oscilloscopeLabel'),
+    spectrumLabel: byId('spectrumLabel'),
+    spectrogramLabel: byId('spectrogramLabel'),
+    scopeCanvas: byId('oscilloscopeCanvas'),
+    spectrumCanvas: byId('spectrumCanvas'),
+    spectrogramCanvas: byId('spectrogramCanvas')
+  };
+
+  var REQUIRED_IDS = [
+    'toggle', 'scopeToggle', 'scopeScale', 'scale', 'windowBtn', 'smooth',
+    'status', 'scopePanel', 'scopeLabel', 'spectrumLabel', 'spectrogramLabel',
+    'scopeCanvas', 'spectrumCanvas', 'spectrogramCanvas'
+  ];
+  for (var r = 0; r < REQUIRED_IDS.length; r++) {
+    if (!el[REQUIRED_IDS[r]]) {
+      console.error('[WebAudioSpectrum] missing element #' + REQUIRED_IDS[r]);
+      return;
     }
-    
-    resizeCanvases();
+  }
 
-    let audioContext = null;
-    let analyser = null;
-    let dataArray = null;
-    let timeDataArray = null;
-    let bufferLength = null;
-    let spectrogramData = [];
-    let isLogScale = false; // Initialize as linear scale
-	let useHammingWindow = false;
-    let showOscilloscope = false;
-    let oscilloscopeScaleMode = 'linear'; // 'linear', 'log', 'compand'
-	let useSmoothing = false;
-    const maxFrames = 100; // Number of frames to store in the spectrogram
-    const OSCILLOSCOPE_SAMPLES = 4096; // Double the FFT size for longer time window
-	let hammingTimeWeights = null; // Precomputed, gain-compensated Hamming window for time-domain samples
-	let fftWorkRe = null;
-	let fftWorkIm = null;
-	const CUSTOM_SMOOTH_ALPHA = 0.8; // For custom FFT path smoothing
-	let customSmoothPrev = null; // Uint8Array for EMA smoothing on custom path
-    scaleBtn.addEventListener('click', function () {
-        isLogScale = !isLogScale; // Toggle between Log and Linear scale
-        console.log("Frequency scale toggled. Log scale is now " + (isLogScale ? "ON" : "OFF"));
-        scaleBtn.textContent = isLogScale ? "Scale: Log" : "Scale: Linear";
-        scaleBtn.classList.toggle('active', isLogScale);
-        
-        // Update labels
-        const scaleText = isLogScale ? "Log" : "Linear";
-        spectrumLabel.textContent = `Frequency Spectrum - ${scaleText}`;
-        spectrogramLabel.textContent = `Spectrogram (Time-Frequency) - ${scaleText}`;
-    });
+  // ---------------------------------------------------------------- state
 
-    windowBtn.addEventListener('click', function () {
-        useHammingWindow = !useHammingWindow;
-        windowBtn.textContent = useHammingWindow ? "Window: Hamming" : "Window: Rectangular";
-        windowBtn.classList.toggle('active', useHammingWindow);
-    });
+  var audioContext = null;
+  var analyser = null;
+  var sourceNode = null;
+  var mediaStream = null;
+  var analyzer = null;
+  var timeData = null;
 
-	smoothBtn.addEventListener('click', function () {
-		useSmoothing = !useSmoothing;
-		smoothBtn.textContent = useSmoothing ? 'Smooth: On' : 'Smooth: Off';
-		smoothBtn.classList.toggle('active', useSmoothing);
-	});
+  var sampling = false;
+  var starting = false;
+  var rafId = 0;
+  var resizeScheduled = false;
 
-    oscilloscopeBtn.addEventListener('click', function () {
-        showOscilloscope = !showOscilloscope;
-        oscilloscopeBtn.textContent = showOscilloscope ? "Hide Oscilloscope" : "Show Oscilloscope";
-        oscilloscopeBtn.classList.toggle('active', showOscilloscope);
-        oscilloscopeContainer.classList.toggle('show', showOscilloscope);
-        oscilloscopeScaleBtn.style.display = showOscilloscope ? 'inline-block' : 'none';
-        if (showOscilloscope) {
-            // Resize the oscilloscope canvas when it becomes visible
-            setTimeout(() => {
-                oscilloscopeCanvas.width = oscilloscopeCanvas.offsetWidth;
-                oscilloscopeCanvas.height = oscilloscopeCanvas.offsetHeight;
-            }, 10);
+  var sampleRate = 44100;
+  var freqMode = 'linear';
+  var scopeMode = 'linear';
+  var useWindow = false;
+  var useSmoothing = false;
+  var showScope = false;
+
+  var ring = DSP.createFrameRing(CONFIG.maxFrames, CONFIG.fftSize >> 1);
+
+  // -------------------------------------------------------------- palettes
+
+  var SPECTRUM_PALETTE = (function () {
+    var colors = new Array(256);
+    for (var v = 0; v < 256; v++) {
+      var t = v / 255;
+      colors[v] = 'hsl(' + Math.round(190 - 150 * t) + ', 90%, ' + Math.round(46 + 16 * t) + '%)';
+    }
+    return colors;
+  })();
+
+  var SPECTROGRAM_PALETTE = (function () {
+    var stops = [
+      [0, 0, 4], [40, 11, 84], [101, 21, 110], [159, 42, 99],
+      [212, 72, 66], [245, 125, 21], [250, 193, 39], [252, 255, 164]
+    ];
+    var rgb = new Uint8Array(256 * 3);
+    var packed = new Uint32Array(256);
+    for (var v = 0; v < 256; v++) {
+      var t = (v / 255) * (stops.length - 1);
+      var index = Math.min(Math.floor(t), stops.length - 2);
+      var f = t - index;
+      var a = stops[index];
+      var b = stops[index + 1];
+      var red = Math.round(a[0] + (b[0] - a[0]) * f);
+      var green = Math.round(a[1] + (b[1] - a[1]) * f);
+      var blue = Math.round(a[2] + (b[2] - a[2]) * f);
+      rgb[v * 3] = red;
+      rgb[v * 3 + 1] = green;
+      rgb[v * 3 + 2] = blue;
+      packed[v] = LITTLE_ENDIAN
+        ? ((255 << 24) | (blue << 16) | (green << 8) | red) >>> 0
+        : ((255 << 24) | (red << 16) | (green << 8) | blue) >>> 0;
+    }
+    return { packed: packed, rgb: rgb };
+  })();
+
+  var specCache = null;
+
+  // --------------------------------------------------------------- helpers
+
+  function clamp(value, min, max) {
+    return value < min ? min : value > max ? max : value;
+  }
+
+  function setStatus(text, isError) {
+    el.status.textContent = text;
+    el.status.classList.toggle('error', !!isError);
+  }
+
+  function describeError(error) {
+    var name = error && error.name;
+    if (name === 'NotAllowedError' || name === 'SecurityError') {
+      return 'Microphone access was blocked. Allow it in the browser site settings (HTTPS or localhost) and try again.';
+    }
+    if (name === 'NotFoundError' || name === 'OverconstrainedError') {
+      return 'No microphone is available on this device.';
+    }
+    if (name === 'NotReadableError') {
+      return 'The microphone is already in use by another app.';
+    }
+    return 'Could not start sampling: ' + ((error && error.message) || 'unknown error') + '.';
+  }
+
+  function fitCanvas(canvas) {
+    var dpr = Math.min(window.devicePixelRatio || 1, CONFIG.maxPixelRatio);
+    var cssWidth = Math.max(1, Math.round(canvas.clientWidth || canvas.width || 1));
+    var cssHeight = Math.max(1, Math.round(canvas.clientHeight || canvas.height || 1));
+    var pixelWidth = Math.max(1, Math.round(cssWidth * dpr));
+    var pixelHeight = Math.max(1, Math.round(cssHeight * dpr));
+    if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+      canvas.width = pixelWidth;
+      canvas.height = pixelHeight;
+    }
+    var ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { ctx: ctx, width: cssWidth, height: cssHeight };
+  }
+
+  function plotRect(width, height) {
+    return {
+      x: LAYOUT.left,
+      y: LAYOUT.top,
+      w: Math.max(20, width - LAYOUT.left - LAYOUT.right),
+      h: Math.max(20, height - LAYOUT.top - LAYOUT.bottom)
+    };
+  }
+
+  function paintBackground(ctx, width, height) {
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, width, height);
+  }
+
+  function drawHint(ctx, rect, text) {
+    ctx.font = HINT_FONT;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(255,255,255,0.28)';
+    ctx.fillText(text, rect.x + rect.w / 2, rect.y + rect.h / 2);
+  }
+
+  function formatDuration(seconds) {
+    if (!isFinite(seconds) || seconds <= 0) return '0 s';
+    if (seconds >= 1) return (Math.round(seconds * 10) / 10) + ' s';
+    return Math.round(seconds * 1000) + ' ms';
+  }
+
+  function capitalize(text) {
+    return text.charAt(0).toUpperCase() + text.slice(1);
+  }
+
+  // -------------------------------------------------------------- frequency
+
+  function niceStep(range, targetTicks) {
+    var raw = range / Math.max(1, targetTicks);
+    var magnitude = Math.pow(10, Math.floor(Math.log10(raw)));
+    var multiples = [1, 2, 2.5, 5, 10];
+    var best = multiples[0] * magnitude;
+    var bestError = Infinity;
+    for (var i = 0; i < multiples.length; i++) {
+      var candidate = multiples[i] * magnitude;
+      var error = Math.abs(candidate - raw);
+      if (error < bestError) {
+        best = candidate;
+        bestError = error;
+      }
+    }
+    return best;
+  }
+
+  function frequencyTicks(plotWidth) {
+    var nyquist = sampleRate / 2;
+    var ticks = [];
+    var i;
+    if (freqMode === 'log') {
+      for (i = 0; i < LOG_FREQUENCIES.length; i++) {
+        if (LOG_FREQUENCIES[i] < nyquist) ticks.push(LOG_FREQUENCIES[i]);
+      }
+    } else {
+      var step = niceStep(nyquist, Math.max(3, Math.round(plotWidth / 90)));
+      for (var freq = step; freq < nyquist * 0.995; freq += step) ticks.push(freq);
+    }
+    return ticks;
+  }
+
+  function freqToX(freq, rect) {
+    return DSP.frequencyToX(
+      freq, sampleRate, freqMode, rect.x, rect.w, CONFIG.logMinFrequency
+    );
+  }
+
+  function drawFrequencyGrid(ctx, rect, ticks) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (var i = 0; i < ticks.length; i++) {
+      var x = Math.round(freqToX(ticks[i], rect)) + 0.5;
+      ctx.moveTo(x, rect.y);
+      ctx.lineTo(x, rect.y + rect.h);
+    }
+    ctx.stroke();
+  }
+
+  function drawFrequencyLabels(ctx, rect, ticks) {
+    ctx.font = LABEL_FONT;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = 'rgba(255,255,255,0.62)';
+    var lastX = -Infinity;
+    for (var i = 0; i < ticks.length; i++) {
+      var x = freqToX(ticks[i], rect);
+      if (i > 0 && x - lastX < MIN_LABEL_GAP && i !== ticks.length - 1) continue;
+      ctx.fillText(DSP.formatHz(ticks[i]), x, rect.y + rect.h + 6);
+      lastX = x;
+    }
+  }
+
+  function drawDecibelGrid(ctx, rect) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (var i = 0; i < CONFIG.decibelTicks.length; i++) {
+      var y = Math.round(decibelToY(CONFIG.decibelTicks[i], rect)) + 0.5;
+      ctx.moveTo(rect.x, y);
+      ctx.lineTo(rect.x + rect.w, y);
+    }
+    ctx.stroke();
+  }
+
+  function decibelToY(db, rect) {
+    var t = (db - CONFIG.minDb) / (CONFIG.maxDb - CONFIG.minDb);
+    return rect.y + rect.h * (1 - clamp(t, 0, 1));
+  }
+
+  function drawDecibelLabels(ctx, rect) {
+    ctx.font = LABEL_FONT;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(255,255,255,0.62)';
+    for (var i = 0; i < CONFIG.decibelTicks.length; i++) {
+      var y = clamp(decibelToY(CONFIG.decibelTicks[i], rect), rect.y + 5, rect.y + rect.h - 5);
+      ctx.fillText(String(CONFIG.decibelTicks[i]), rect.x - 8, y);
+    }
+  }
+
+  function drawTimeGrid(ctx, rect) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (var i = 0; i <= CONFIG.timeRows; i++) {
+      var y = Math.round(rect.y + (rect.h * i) / CONFIG.timeRows) + 0.5;
+      ctx.moveTo(rect.x, y);
+      ctx.lineTo(rect.x + rect.w, y);
+    }
+    ctx.stroke();
+  }
+
+  function drawTimeLabels(ctx, rect, spanSeconds) {
+    ctx.font = LABEL_FONT;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(255,255,255,0.62)';
+    for (var i = 0; i <= CONFIG.timeRows; i++) {
+      var y = rect.y + (rect.h * i) / CONFIG.timeRows;
+      var secondsAgo = spanSeconds * (1 - i / CONFIG.timeRows);
+      ctx.fillText(formatDuration(secondsAgo), rect.x - 8, y);
+    }
+  }
+
+  function drawPlotFrame(ctx, rect) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(rect.x + 0.5, rect.y);
+    ctx.lineTo(rect.x + 0.5, rect.y + rect.h);
+    ctx.moveTo(rect.x, rect.y + rect.h + 0.5);
+    ctx.lineTo(rect.x + rect.w, rect.y + rect.h + 0.5);
+    ctx.stroke();
+  }
+
+  // -------------------------------------------------------------- spectrum
+
+  function drawSpectrumBars(ctx, rect, values) {
+    var binCount = values.length;
+    var nyquist = sampleRate / 2;
+    for (var bin = 0; bin < binCount; bin++) {
+      var level = values[bin];
+      if (level <= 0) continue;
+      var left = freqToX((bin * nyquist) / binCount, rect);
+      var right = freqToX(((bin + 1) * nyquist) / binCount, rect);
+      var barWidth = right - left;
+      if (barWidth < 1) barWidth = 1;
+      var barHeight = (level / 255) * rect.h;
+      ctx.fillStyle = SPECTRUM_PALETTE[level];
+      ctx.fillRect(left, rect.y + rect.h - barHeight, barWidth, barHeight);
+    }
+  }
+
+  function drawSpectrumFrame(values) {
+    var view = fitCanvas(el.spectrumCanvas);
+    var ctx = view.ctx;
+    paintBackground(ctx, view.width, view.height);
+    var rect = plotRect(view.width, view.height);
+    var ticks = frequencyTicks(rect.w);
+
+    drawFrequencyGrid(ctx, rect, ticks);
+    drawDecibelGrid(ctx, rect);
+    if (values) drawSpectrumBars(ctx, rect, values);
+    drawPlotFrame(ctx, rect);
+    drawDecibelLabels(ctx, rect);
+    drawFrequencyLabels(ctx, rect, ticks);
+    if (!values) drawHint(ctx, rect, 'press “Start Sampling”');
+  }
+
+  // ----------------------------------------------------------- spectrogram
+
+  function visibleSpanSeconds() {
+    if (ring.count < 2) return 0;
+    return Math.max(0, (ring.timeAt(0) - ring.timeAt(ring.count - 1)) / 1000);
+  }
+
+  function buildColumnBins(width) {
+    var bins = new Int32Array(width);
+    var half = CONFIG.fftSize >> 1;
+    var nyquist = sampleRate / 2;
+    var logMin = Math.log10(CONFIG.logMinFrequency);
+    var logMax = Math.log10(nyquist);
+    var useLog = freqMode === 'log' && nyquist > CONFIG.logMinFrequency;
+    for (var x = 0; x < width; x++) {
+      var t = (x + 0.5) / width;
+      var freq = useLog ? Math.pow(10, logMin + t * (logMax - logMin)) : t * nyquist;
+      var bin = Math.round((freq / nyquist) * half);
+      bins[x] = clamp(bin, 0, half - 1);
+    }
+    return bins;
+  }
+
+  function ensureSpectrogramCache(width, height) {
+    if (!specCache) {
+      var canvas = document.createElement('canvas');
+      specCache = {
+        canvas: canvas,
+        ctx: canvas.getContext('2d'),
+        width: 0,
+        height: 0,
+        image: null,
+        pixels: null,
+        bytes: null,
+        columnBins: null,
+        cacheKey: ''
+      };
+    }
+    if (specCache.width !== width || specCache.height !== height) {
+      specCache.canvas.width = width;
+      specCache.canvas.height = height;
+      specCache.image = specCache.ctx.createImageData(width, height);
+      specCache.pixels = LITTLE_ENDIAN
+        ? new Uint32Array(specCache.image.data.buffer)
+        : null;
+      specCache.bytes = specCache.image.data;
+      if (!specCache.pixels) {
+        // Big-endian fallback: start from opaque black so empty rows stay black.
+        for (var byteIndex = 3; byteIndex < specCache.bytes.length; byteIndex += 4) {
+          specCache.bytes[byteIndex] = 255;
         }
-    });
-    
-    oscilloscopeScaleBtn.addEventListener('click', function () {
-        if (oscilloscopeScaleMode === 'linear') {
-            oscilloscopeScaleMode = 'log';
-            oscilloscopeScaleBtn.textContent = 'Scope: Log';
-        } else if (oscilloscopeScaleMode === 'log') {
-            oscilloscopeScaleMode = 'compand';
-            oscilloscopeScaleBtn.textContent = 'Scope: Compand';
+      }
+      specCache.width = width;
+      specCache.height = height;
+      specCache.cacheKey = '';
+    }
+    var key = freqMode + '|' + sampleRate + '|' + width;
+    if (specCache.cacheKey !== key) {
+      specCache.columnBins = buildColumnBins(width);
+      specCache.cacheKey = key;
+    }
+  }
+
+  function drawSpectrogramImage(ctx, rect) {
+    var width = Math.max(1, Math.floor(rect.w));
+    var height = Math.max(1, Math.floor(rect.h));
+    ensureSpectrogramCache(width, height);
+
+    var count = ring.count;
+    var pixels = specCache.pixels;
+    var bytes = specCache.bytes;
+    var bins = specCache.columnBins;
+    var palette = SPECTROGRAM_PALETTE;
+
+    if (pixels) pixels.fill(OPAQUE_BLACK);
+
+    if (count > 0) {
+      for (var y = 0; y < height; y++) {
+        // Newest frame at the bottom, oldest at the top.
+        var age = Math.round((1 - (y + 0.5) / height) * (count - 1));
+        var frame = ring.dataAt(age);
+        var rowStart = y * width;
+        if (!frame) continue;
+        if (pixels) {
+          for (var x = 0; x < width; x++) {
+            pixels[rowStart + x] = palette.packed[frame[bins[x]]];
+          }
         } else {
-            oscilloscopeScaleMode = 'linear';
-            oscilloscopeScaleBtn.textContent = 'Scope: Linear';
+          for (var column = 0; column < width; column++) {
+            var level = frame[bins[column]];
+            var offset = (rowStart + column) * 4;
+            bytes[offset] = palette.rgb[level * 3];
+            bytes[offset + 1] = palette.rgb[level * 3 + 1];
+            bytes[offset + 2] = palette.rgb[level * 3 + 2];
+            bytes[offset + 3] = 255;
+          }
         }
-        oscilloscopeScaleBtn.classList.toggle('active', oscilloscopeScaleMode !== 'linear');
-        
-        // Update oscilloscope label
-        const modeText = oscilloscopeScaleMode.charAt(0).toUpperCase() + oscilloscopeScaleMode.slice(1);
-        oscilloscopeLabel.textContent = `Oscilloscope (Time Domain) - ${modeText}`;
-    });
-
-    btn.addEventListener('click', function () {
-        // Check if the AudioContext has been initialized
-        if (!audioContext) {
-            // Initialize AudioContext and other related setups
-            audioContext = new AudioContext();
-            analyser = audioContext.createAnalyser();
-            analyser.fftSize = 2048;
-            analyser.smoothingTimeConstant = 0.85; // keep buttery-smooth when using built-in spectrum
-            bufferLength = analyser.frequencyBinCount;
-            dataArray = new Uint8Array(bufferLength);
-            timeDataArray = new Uint8Array(OSCILLOSCOPE_SAMPLES);
-
-			// Precompute Hamming window for time-domain samples with coherent gain compensation (mean=1)
-			precomputeHammingTimeWindow(analyser.fftSize);
-			fftWorkRe = new Float32Array(analyser.fftSize);
-			fftWorkIm = new Float32Array(analyser.fftSize);
-
-            // Request access to the microphone
-            navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
-                const source = audioContext.createMediaStreamSource(stream);
-                source.connect(analyser);
-                btn.textContent = 'Stop Sampling';
-                btn.classList.add('stop');
-                updateSpectrum(); // Start the visualization
-            }).catch(function (err) {
-                console.error('Error accessing media devices:', err);
-            });
-        } else {
-            // Toggle the state based on current state of the AudioContext
-            if (audioContext.state === 'running') {
-                audioContext.suspend().then(() => {
-                    btn.textContent = 'Start Sampling';
-                    btn.classList.remove('stop');
-                    console.log("AudioContext suspended");
-                });
-            } else if (audioContext.state === 'suspended') {
-                audioContext.resume().then(() => {
-                    btn.textContent = 'Stop Sampling';
-                    btn.classList.add('stop');
-                    console.log("AudioContext resumed");
-                    updateSpectrum(); // Ensure that the visual update loop continues
-                });
-            }
-        }
-    });
-
-	function applyScaling(bufferLength, width, sampleRate, mode) {
-        const xs = new Array(bufferLength);
-        const ws = new Array(bufferLength);
-        if (mode === 'log') {
-            const nyquist = sampleRate / 2;
-            const fMin = nyquist / bufferLength; // avoid 0 Hz
-            const logMin = Math.log10(fMin);
-            const logMax = Math.log10(nyquist);
-            for (let i = 0; i < bufferLength; i++) {
-                const fLo = Math.max(i, 1) * nyquist / bufferLength;
-                const fHi = Math.max(i + 1, 1) * nyquist / bufferLength;
-                const xLo = (Math.log10(fLo) - logMin) / (logMax - logMin) * width;
-                const xHi = (Math.log10(fHi) - logMin) / (logMax - logMin) * width;
-                xs[i] = xLo;
-                ws[i] = Math.max(1, xHi - xLo);
-            }
-        } else {
-            const step = width / bufferLength;
-            for (let i = 0; i < bufferLength; i++) {
-                xs[i] = i * step;
-                ws[i] = step;
-            }
-        }
-        return { xs, ws };
+      }
     }
 
-	function smoothArray(input, windowSize) {
-		const n = input.length;
-		const output = new Float32Array(n);
-		const half = Math.floor(windowSize / 2);
-		for (let i = 0; i < n; i++) {
-			let sum = 0;
-			let count = 0;
-			const start = Math.max(0, i - half);
-			const end = Math.min(n - 1, i + half);
-			for (let j = start; j <= end; j++) {
-				sum += input[j];
-				count++;
-			}
-			output[i] = count > 0 ? (sum / count) : input[i];
-		}
-		return output;
-	}
+    specCache.ctx.putImageData(specCache.image, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(specCache.canvas, rect.x, rect.y, rect.w, rect.h);
+    ctx.imageSmoothingEnabled = true;
+  }
 
-	function precomputeHammingTimeWindow(size) {
-		const w = new Float32Array(size);
-		let sum = 0;
-		for (let n = 0; n < size; n++) {
-			const wn = 0.54 - 0.46 * Math.cos((2 * Math.PI * n) / (size - 1));
-			w[n] = wn;
-			sum += wn;
-		}
-		// Coherent gain compensation: normalize by mean value of window
-		const mean = sum / size;
-		const gain = mean > 0 ? (1 / mean) : 1;
-		for (let n = 0; n < size; n++) {
-			w[n] *= gain;
-		}
-		hammingTimeWeights = w;
-	}
+  function drawSpectrogramFrame() {
+    var view = fitCanvas(el.spectrogramCanvas);
+    var ctx = view.ctx;
+    paintBackground(ctx, view.width, view.height);
+    var rect = plotRect(view.width, view.height);
+    var ticks = frequencyTicks(rect.w);
 
-	function bitReverseIndex(index, bits) {
-		let reversed = 0;
-		for (let i = 0; i < bits; i++) {
-			reversed = (reversed << 1) | (index & 1);
-			index >>= 1;
-		}
-		return reversed;
-	}
+    drawSpectrogramImage(ctx, rect);
+    drawFrequencyGrid(ctx, rect, ticks);
+    drawTimeGrid(ctx, rect);
+    drawPlotFrame(ctx, rect);
+    if (ring.count >= 2) drawTimeLabels(ctx, rect, visibleSpanSeconds());
+    drawFrequencyLabels(ctx, rect, ticks);
+    if (ring.count === 0) drawHint(ctx, rect, sampling ? 'waiting for audio…' : 'press “Start Sampling”');
+  }
 
-	function fftRadix2InPlace(real, imag) {
-		const n = real.length;
-		const levels = Math.floor(Math.log2(n));
-		// Bit-reversal permutation
-		for (let i = 0; i < n; i++) {
-			const j = bitReverseIndex(i, levels);
-			if (j > i) {
-				const tr = real[i]; real[i] = real[j]; real[j] = tr;
-				const ti = imag[i]; imag[i] = imag[j]; imag[j] = ti;
-			}
-		}
-		// Cooley–Tukey
-		for (let size = 2; size <= n; size <<= 1) {
-			const halfSize = size >> 1;
-			const tableStep = (2 * Math.PI) / size;
-			for (let i = 0; i < n; i += size) {
-				for (let j = 0; j < halfSize; j++) {
-					const angle = j * tableStep;
-					const wr = Math.cos(angle);
-					const wi = -Math.sin(angle);
-					const k = i + j;
-					const l = k + halfSize;
-					const tr = wr * real[l] - wi * imag[l];
-					const ti = wr * imag[l] + wi * real[l];
-					real[l] = real[k] - tr;
-					imag[l] = imag[k] - ti;
-					real[k] = real[k] + tr;
-					imag[k] = imag[k] + ti;
-				}
-			}
-		}
-	}
+  // ---------------------------------------------------------- oscilloscope
 
-	function computeSpectrumBytes(useWindow) {
-		const n = analyser.fftSize;
-		if (!fftWorkRe || fftWorkRe.length !== n) {
-			fftWorkRe = new Float32Array(n);
-			fftWorkIm = new Float32Array(n);
-		}
-		// Grab float time-domain data in [-1,1]
-		const time = new Float32Array(n);
-		analyser.getFloatTimeDomainData(time);
-		// Apply window if requested
-		if (useWindow && hammingTimeWeights && hammingTimeWeights.length === n) {
-			for (let i = 0; i < n; i++) fftWorkRe[i] = time[i] * hammingTimeWeights[i];
-		} else {
-			for (let i = 0; i < n; i++) fftWorkRe[i] = time[i];
-		}
-		for (let i = 0; i < n; i++) fftWorkIm[i] = 0;
-		// Run FFT
-		fftRadix2InPlace(fftWorkRe, fftWorkIm);
-		// Compute magnitudes for first N/2 bins
-		const half = n >> 1;
-		const mags = new Float32Array(half);
-		for (let k = 0; k < half; k++) {
-			const re = fftWorkRe[k];
-			const im = fftWorkIm[k];
-			const mag = Math.hypot(re, im);
-			mags[k] = mag;
-		}
-		// Convert to dBFS-like scale using N/2 normalization so 1.0 sine ≈ 0 dB
-		const out = new Uint8Array(half);
-		const ref = n / 2;
-		const minDb = -90;
-		for (let k = 0; k < half; k++) {
-			const magNorm = mags[k] / ref;
-			let db = 20 * Math.log10(magNorm + 1e-12);
-			if (db < minDb) db = minDb;
-			if (db > 0) db = 0;
-			const lin = (db - minDb) / (0 - minDb);
-			let v = Math.round(lin * 255);
-			if (v < 0) v = 0; else if (v > 255) v = 255;
-			out[k] = v;
-		}
-		// Apply simple EMA smoothing to stabilize display
-		if (!customSmoothPrev || customSmoothPrev.length !== half) {
-			customSmoothPrev = new Uint8Array(half);
-		}
-		for (let k = 0; k < half; k++) {
-			customSmoothPrev[k] = Math.round(CUSTOM_SMOOTH_ALPHA * customSmoothPrev[k] + (1 - CUSTOM_SMOOTH_ALPHA) * out[k]);
-			out[k] = customSmoothPrev[k];
-		}
-		return out;
-	}
+  function drawOscilloscopeFrame(samples) {
+    var view = fitCanvas(el.scopeCanvas);
+    var ctx = view.ctx;
+    paintBackground(ctx, view.width, view.height);
 
-	function frequencyToX(f, width, sampleRate, mode) {
-		const nyquist = sampleRate / 2;
-		if (mode === 'log') {
-			const fMin = nyquist / bufferLength;
-			const clamped = Math.max(fMin, Math.min(f, nyquist));
-			const logMin = Math.log10(fMin);
-			const logMax = Math.log10(nyquist);
-			return (Math.log10(clamped) - logMin) / (logMax - logMin) * width;
-		}
-		return Math.max(0, Math.min(width, (f / nyquist) * width));
-	}
+    var x0 = 8;
+    var y0 = 6;
+    var innerWidth = Math.max(10, view.width - 16);
+    var innerHeight = Math.max(10, view.height - 12);
+    var middle = y0 + innerHeight / 2;
 
-	function formatHz(f) {
-		if (f >= 1000) {
-			const k = f / 1000;
-			return (k >= 10 ? Math.round(k) : Math.round(k * 10) / 10) + 'k';
-		}
-		return String(Math.round(f));
-	}
+    ctx.strokeStyle = 'rgba(57,255,106,0.14)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(x0, middle + 0.5);
+    ctx.lineTo(x0 + innerWidth, middle + 0.5);
+    ctx.stroke();
+    ctx.setLineDash([]);
 
-	function chooseLinearStep(nyquist, width) {
-		// Aim ~80-120 px between ticks
-		const targetPx = 90;
-		const hzPerPx = nyquist / width;
-		const targetHz = hzPerPx * targetPx;
-		const pow10 = Math.pow(10, Math.floor(Math.log10(targetHz)));
-		const candidates = [1, 2, 5].map(m => m * pow10);
-		let best = candidates[0];
-		let bestDiff = Math.abs(candidates[0] - targetHz);
-		for (let i = 1; i < candidates.length; i++) {
-			const d = Math.abs(candidates[i] - targetHz);
-			if (d < bestDiff) { best = candidates[i]; bestDiff = d; }
-		}
-		return best;
-	}
-
-	function drawFrequencyAxis(context, width, height, sampleRate, bufferLength, mode, phase) {
-		const nyquist = sampleRate / 2;
-		context.save();
-		context.font = '10px -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif';
-		context.textAlign = 'center';
-		context.textBaseline = 'bottom';
-		const gridColor = 'rgba(255,255,255,0.08)';
-		const tickColor = 'rgba(255,255,255,0.25)';
-		const labelColor = 'rgba(255,255,255,0.7)';
-
-		let freqs = [];
-		let minor = [];
-		if (mode === 'log') {
-			// Major decades and 2/5 multiples
-			const majors = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
-			for (let i = 0; i < majors.length; i++) {
-				const f = majors[i];
-				if (f <= nyquist) freqs.push(f);
-			}
-			// Minor ticks: within each decade: 2x, 3x, 5x
-			const decades = [10, 100, 1000, 10000];
-			for (let d = 0; d < decades.length; d++) {
-				const base = decades[d];
-				[2, 3, 5].forEach(m => {
-					const f = base * m;
-					if (f <= nyquist) minor.push(f);
-				});
-			}
-		} else {
-			const step = chooseLinearStep(nyquist, width);
-			for (let f = step; f <= nyquist; f += step) freqs.push(f);
-		}
-
-		// Grid lines
-		if (phase === 'grid') {
-			context.strokeStyle = gridColor;
-			context.lineWidth = 1;
-			context.beginPath();
-			for (let i = 0; i < freqs.length; i++) {
-				const x = Math.round(frequencyToX(freqs[i], width, sampleRate, mode)) + 0.5;
-				context.moveTo(x, 0);
-				context.lineTo(x, height);
-			}
-			// Minor grid for log only
-			if (mode === 'log') {
-				for (let i = 0; i < minor.length; i++) {
-					const x = Math.round(frequencyToX(minor[i], width, sampleRate, mode)) + 0.5;
-					context.moveTo(x, 0);
-					context.lineTo(x, height);
-				}
-			}
-			context.stroke();
-		}
-
-		// Ticks and labels (draw on top)
-		if (phase === 'labels') {
-			// Ticks
-			context.strokeStyle = tickColor;
-			context.lineWidth = 1;
-			for (let i = 0; i < freqs.length; i++) {
-				const x = Math.round(frequencyToX(freqs[i], width, sampleRate, mode)) + 0.5;
-				context.beginPath();
-				context.moveTo(x, height);
-				context.lineTo(x, height - 6);
-				context.stroke();
-			}
-			// Labels
-			context.fillStyle = labelColor;
-			for (let i = 0; i < freqs.length; i++) {
-				const x = Math.round(frequencyToX(freqs[i], width, sampleRate, mode));
-				context.fillText(formatHz(freqs[i]), x, height - 7);
-			}
-		}
-
-		context.restore();
-	}
-
-function drawYAxis(context, width, height, type, phase = 'both', options = {}) {
-    // type: 'amplitude' for spectrum, 'time' for spectrogram
-		context.save();
-		context.font = '10px -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif';
-		context.textAlign = 'right';
-		context.textBaseline = 'middle';
-		const gridColor = 'rgba(255,255,255,0.08)';
-		const tickColor = 'rgba(255,255,255,0.25)';
-		const labelColor = 'rgba(255,255,255,0.7)';
-
-    if (type === 'amplitude') {
-			// 0..255 maps bottom..top visually; place ticks at 0, 64, 128, 192, 255
-			const ticks = [0, 64, 128, 192, 255];
-        if (phase === 'grid' || phase === 'both') {
-            context.strokeStyle = gridColor;
-            context.lineWidth = 1;
-            context.beginPath();
-            for (let i = 0; i < ticks.length; i++) {
-                const y = Math.round(height - (ticks[i] / 255) * height) + 0.5;
-                context.moveTo(0, y);
-                context.lineTo(width, y);
-            }
-            context.stroke();
-
-            // Axis
-            context.strokeStyle = tickColor;
-            context.beginPath();
-            context.moveTo(0.5, 0);
-            context.lineTo(0.5, height);
-            context.stroke();
-        }
-
-        if (phase === 'labels' || phase === 'both') {
-            // Labels
-            context.fillStyle = labelColor;
-            for (let i = 0; i < ticks.length; i++) {
-                const y = height - (ticks[i] / 255) * height;
-                context.fillText(String(ticks[i]), 28, y);
-            }
-        }
-		} else if (type === 'time') {
-        // Show time from top(old) to bottom(new). Use seconds if provided
-        const rows = 5;
-        const totalSpanSec = options.totalSpanSec;
-        if (phase === 'grid' || phase === 'both') {
-            context.strokeStyle = gridColor;
-            context.lineWidth = 1;
-            context.beginPath();
-            for (let i = 0; i <= rows; i++) {
-                const y = Math.round((i / rows) * height) + 0.5;
-                context.moveTo(0, y);
-                context.lineTo(width, y);
-            }
-            context.stroke();
-
-            // Axis
-            context.strokeStyle = tickColor;
-            context.beginPath();
-            context.moveTo(0.5, 0);
-            context.lineTo(0.5, height);
-            context.stroke();
-        }
-
-        if (phase === 'labels' || phase === 'both') {
-            context.fillStyle = labelColor;
-            for (let i = 0; i <= rows; i++) {
-                const y = (i / rows) * height;
-                let label;
-                if (typeof totalSpanSec === 'number') {
-                    const t = (1 - i / rows) * totalSpanSec;
-                    label = t >= 1 ? (Math.round(t * 10) / 10) + 's' : Math.round(t * 1000) + 'ms';
-                } else {
-                    const rel = Math.round((1 - i / rows) * 100);
-                    label = rel + '%';
-                }
-                context.fillText(label, 28, y);
-            }
-        }
-		}
-
-		context.restore();
-	}
-
-	function drawSpectrum() {
-        const WIDTH = canvas.width;
-        const HEIGHT = canvas.height;
-		let processedData;
-		if (useHammingWindow) {
-			// Build spectrum from time-domain with proper windowing and custom smoothing
-			processedData = computeSpectrumBytes(true);
-		} else {
-			// Use analyzer's built-in smoothing path for buttery visuals
-			analyser.getByteFrequencyData(dataArray);
-			processedData = dataArray;
-		}
-		ctx.fillStyle = 'rgb(0, 0, 0)';
-		ctx.fillRect(0, 0, WIDTH, HEIGHT);
-		// Draw grid underlay and Y axis
-		drawFrequencyAxis(ctx, WIDTH, HEIGHT, audioContext.sampleRate, bufferLength, isLogScale ? 'log' : 'linear', 'grid');
-		drawYAxis(ctx, WIDTH, HEIGHT, 'amplitude');
-
-		const { xs, ws } = applyScaling(bufferLength, WIDTH, audioContext.sampleRate, isLogScale ? 'log' : 'linear');
-
-		// Prepare values array and optionally apply a simple moving average smoothing
-		let values = new Float32Array(bufferLength);
-		for (let i = 0; i < bufferLength; i++) {
-			let v = processedData[i];
-			values[i] = v;
-		}
-		if (useSmoothing) {
-			const windowSize = isLogScale ? 5 : 3;
-			values = smoothArray(values, windowSize);
-		}
-
-		if (useSmoothing) {
-			// Draw filled area under the smoothed curve
-			ctx.fillStyle = 'rgba(0, 200, 255, 0.25)';
-			ctx.beginPath();
-			ctx.moveTo(xs[0], HEIGHT);
-			for (let i = 0; i < bufferLength; i++) {
-				ctx.lineTo(xs[i], HEIGHT - values[i]);
-			}
-			ctx.lineTo(xs[bufferLength - 1], HEIGHT);
-			ctx.closePath();
-			ctx.fill();
-			// Outline
-			ctx.lineWidth = 2;
-			ctx.strokeStyle = 'rgb(0, 200, 255)';
-			ctx.beginPath();
-			ctx.moveTo(xs[0], HEIGHT - values[0]);
-			for (let i = 1; i < bufferLength; i++) {
-				ctx.lineTo(xs[i], HEIGHT - values[i]);
-			}
-			ctx.stroke();
-		} else {
-			// Default: draw bars
-			for (let i = 0; i < bufferLength; i++) {
-				const barHeight = values[i];
-				ctx.fillStyle = `rgb(${barHeight + 100}, 50, 50)`;
-				ctx.fillRect(xs[i], HEIGHT - barHeight, ws[i], barHeight);
-			}
-		}
-		// Draw ticks and labels on top
-		drawFrequencyAxis(ctx, WIDTH, HEIGHT, audioContext.sampleRate, bufferLength, isLogScale ? 'log' : 'linear', 'labels');
-		drawSpectrogram(processedData);
+    if (samples) {
+      ctx.strokeStyle = '#39ff6a';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      var sampleCount = samples.length;
+      for (var i = 0; i < sampleCount; i++) {
+        var v = DSP.toDisplayAmplitude(samples[i], scopeMode);
+        var x = x0 + (i / (sampleCount - 1)) * innerWidth;
+        var y = middle - v * (innerHeight / 2);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    } else {
+      ctx.strokeStyle = 'rgba(57,255,106,0.35)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x0, middle + 0.5);
+      ctx.lineTo(x0 + innerWidth, middle + 0.5);
+      ctx.stroke();
     }
-    
 
-    function drawSpectrogram(processedData) {
-        // Push a copy of processed data to maintain original data integrity
-        spectrogramData.push(new Uint8Array(processedData));
-        if (spectrogramData.length > maxFrames) {
-            spectrogramData.shift(); // Maintain a fixed number of frames
+    var milliseconds = (CONFIG.fftSize / sampleRate) * 1000;
+    ctx.font = LABEL_FONT;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = 'rgba(190,255,200,0.65)';
+    ctx.fillText(
+      milliseconds.toFixed(1) + ' ms · ' + CONFIG.fftSize + ' samples · ' + scopeMode,
+      x0 + innerWidth,
+      y0
+    );
+  }
+
+  // ------------------------------------------------------------- rendering
+
+  function drawIdlePanels() {
+    drawSpectrumFrame(null);
+    drawSpectrogramFrame();
+    if (showScope) drawOscilloscopeFrame(null);
+  }
+
+  function scheduleFrame() {
+    if (!rafId && sampling) rafId = requestAnimationFrame(renderFrame);
+  }
+
+  function renderFrame() {
+    rafId = 0;
+    if (!sampling || document.hidden) return;
+    if (!analyser || !audioContext || audioContext.state !== 'running') return;
+
+    try {
+      analyser.getFloatTimeDomainData(timeData);
+      var spectrum = analyzer(timeData, useWindow, useSmoothing);
+      ring.push(spectrum, performance.now());
+
+      if (showScope) drawOscilloscopeFrame(timeData);
+      drawSpectrumFrame(spectrum);
+      drawSpectrogramFrame();
+    } catch (error) {
+      console.error('[WebAudioSpectrum] frame failed', error);
+      try { stopSampling(); } catch (ignored) { /* ignore */ }
+      setStatus('Visualization stopped after an error: ' + (error && error.message), true);
+      return;
+    }
+
+    scheduleFrame();
+  }
+
+  // ------------------------------------------------------------- lifecycle
+
+  async function beginSampling() {
+    if (sampling || starting) return;
+    starting = true;
+    updateControls();
+    setStatus('Requesting microphone access…');
+
+    var context = null;
+    var stream = null;
+    try {
+      var AudioCtor = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtor) throw new Error('This browser does not support the Web Audio API');
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('Microphone access needs a secure context (HTTPS or localhost)');
+      }
+
+      // Create the context while we still have the click gesture.
+      context = new AudioCtor();
+      var resumePromise = context.state === 'suspended'
+        ? context.resume().catch(function () {})
+        : Promise.resolve();
+
+      var constraints = {
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false
         }
+      };
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (constraintError) {
+        var name = constraintError && constraintError.name;
+        if (name === 'OverconstrainedError' || name === 'TypeError' || name === 'NotSupportedError') {
+          // Older mobile browsers reject the processing flags; plain audio still works.
+          stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        } else {
+          throw constraintError;
+        }
+      }
+      await resumePromise;
+      if (context.state !== 'running') {
+        throw new Error('the audio context stayed suspended');
+      }
 
-        const W = spectrogramCanvas.width;
-        const H = spectrogramCanvas.height;
-        const rowHeight = H / maxFrames; // Fixed height for each frame
+      var analyserNode = context.createAnalyser();
+      analyserNode.fftSize = CONFIG.fftSize;
+      analyserNode.smoothingTimeConstant = 0;
+      analyserNode.minDecibels = CONFIG.minDb;
+      analyserNode.maxDecibels = CONFIG.maxDb;
 
-        // Clear the spectrogram canvas before redrawing it
-        spectrogramCtx.fillStyle = 'rgb(0, 0, 0)';
-        spectrogramCtx.fillRect(0, 0, W, H);
+      var source = context.createMediaStreamSource(stream);
+      source.connect(analyserNode);
 
-    const { xs, ws } = applyScaling(bufferLength, W, audioContext.sampleRate, isLogScale ? 'log' : 'linear');
-    // Underlay grid and Y-axis (time) and X-axis grid for spectrogram
-    drawFrequencyAxis(spectrogramCtx, W, H, audioContext.sampleRate, bufferLength, isLogScale ? 'log' : 'linear', 'grid');
-    // Estimate total visible time span for y labels: maxFrames frames, each roughly fftSize/sampleRate seconds
-    const secondsPerFrame = analyser.fftSize / audioContext.sampleRate;
-    const totalSpanSec = maxFrames * secondsPerFrame;
-    drawYAxis(spectrogramCtx, W, H, 'time', 'grid', { totalSpanSec });
-    // Draw each frame stored in the spectrogram data
-		spectrogramData.forEach((frameData, index) => {
-            const y = H - (index + 1) * rowHeight;
-            for (let bin = 0; bin < bufferLength; bin++) {
-				let value = frameData[bin];
-                const brightness = value / 256;
-                spectrogramCtx.fillStyle = `rgb(0, ${brightness * 255}, ${brightness * 255})`;
-                // Calculate the correct y position for each frame
-                spectrogramCtx.fillRect(xs[bin], y, ws[bin], rowHeight);
-            }
+      audioContext = context;
+      analyser = analyserNode;
+      sourceNode = source;
+      mediaStream = stream;
+      sampleRate = context.sampleRate;
+      timeData = new Float32Array(analyserNode.fftSize);
+      analyzer = DSP.createSpectrumAnalyzer({
+        fftSize: analyserNode.fftSize,
+        minDb: CONFIG.minDb,
+        maxDb: CONFIG.maxDb,
+        smoothing: CONFIG.smoothingAlpha
+      });
+      audioContext.onstatechange = function () {
+        if (sampling && audioContext && audioContext.state === 'running') scheduleFrame();
+      };
+
+      ring.clear();
+      sampling = true;
+      starting = false;
+      setStatus('Sampling — play audio or speak.');
+      updateControls();
+      scheduleFrame();
+    } catch (error) {
+      if (stream) {
+        stream.getTracks().forEach(function (track) {
+          try { track.stop(); } catch (e) { /* ignore */ }
         });
-    // Top overlay ticks and labels for frequency axis and y-axis labels
-    drawFrequencyAxis(spectrogramCtx, W, H, audioContext.sampleRate, bufferLength, isLogScale ? 'log' : 'linear', 'labels');
-    drawYAxis(spectrogramCtx, W, H, 'time', 'labels', { totalSpanSec });
+      }
+      if (context) {
+        try {
+          var rejected = context.close();
+          if (rejected && typeof rejected.catch === 'function') rejected.catch(function () {});
+        } catch (e) { /* ignore */ }
+      }
+      mediaStream = null;
+      audioContext = null;
+      analyser = null;
+      sourceNode = null;
+      timeData = null;
+      analyzer = null;
+      sampling = false;
+      starting = false;
+      setStatus(describeError(error), true);
+      updateControls();
+      drawIdlePanels();
     }
-    
+  }
 
-    function drawOscilloscope() {
-        if (!showOscilloscope || !audioContext) return;
-        
-        // Get time domain data - use only the first 2048 samples from analyser
-        const tempData = new Uint8Array(analyser.fftSize);
-        analyser.getByteTimeDomainData(tempData);
-        
-        // Copy to our larger array, filling the rest with center value (128)
-        for (let i = 0; i < OSCILLOSCOPE_SAMPLES; i++) {
-            if (i < analyser.fftSize) {
-                timeDataArray[i] = tempData[i];
-            } else {
-                timeDataArray[i] = 128; // Center line
-            }
+  function stopSampling() {
+    sampling = false;
+    if (rafId) {
+      cancelAnimationFrame(rafId);
+      rafId = 0;
+    }
+    if (mediaStream) {
+      mediaStream.getTracks().forEach(function (track) {
+        try { track.stop(); } catch (e) { /* ignore */ }
+      });
+    }
+    if (sourceNode) {
+      try { sourceNode.disconnect(); } catch (e) { /* ignore */ }
+    }
+    if (analyser) {
+      try { analyser.disconnect(); } catch (e) { /* ignore */ }
+    }
+    if (audioContext) {
+      var context = audioContext;
+      try {
+        var closing = context.close();
+        if (closing && typeof closing.catch === 'function') closing.catch(function () {});
+      } catch (e) { /* ignore */ }
+    }
+    mediaStream = null;
+    audioContext = null;
+    analyser = null;
+    sourceNode = null;
+    timeData = null;
+    analyzer = null;
+    ring.clear();
+    setStatus('Stopped — microphone released.');
+    updateControls();
+    drawIdlePanels();
+  }
+
+  // ---------------------------------------------------------------- controls
+
+  function updateControls() {
+    el.toggle.textContent = starting ? 'Starting…' : sampling ? 'Stop Sampling' : 'Start Sampling';
+    el.toggle.disabled = starting;
+    el.toggle.classList.add('primary');
+    el.toggle.classList.toggle('stop', sampling);
+    el.toggle.setAttribute('aria-pressed', String(sampling));
+
+    el.scopeToggle.textContent = showScope ? 'Hide Oscilloscope' : 'Show Oscilloscope';
+    el.scopeToggle.classList.toggle('active', showScope);
+    el.scopeToggle.setAttribute('aria-pressed', String(showScope));
+
+    el.scopeScale.textContent = 'Scope: ' + capitalize(scopeMode);
+    el.scopeScale.classList.toggle('active', scopeMode !== 'linear');
+    el.scopeScale.setAttribute('aria-pressed', String(scopeMode !== 'linear'));
+    el.scopeScale.style.display = showScope ? 'inline-block' : 'none';
+
+    el.scale.textContent = 'Scale: ' + (freqMode === 'log' ? 'Log' : 'Linear');
+    el.scale.classList.toggle('active', freqMode === 'log');
+    el.scale.setAttribute('aria-pressed', String(freqMode === 'log'));
+
+    el.windowBtn.textContent = 'Window: ' + (useWindow ? 'Hamming' : 'Rectangular');
+    el.windowBtn.classList.toggle('active', useWindow);
+    el.windowBtn.setAttribute('aria-pressed', String(useWindow));
+
+    el.smooth.textContent = 'Smooth: ' + (useSmoothing ? 'On' : 'Off');
+    el.smooth.classList.toggle('active', useSmoothing);
+    el.smooth.setAttribute('aria-pressed', String(useSmoothing));
+
+    el.scopePanel.classList.toggle('show', showScope);
+    el.scopeLabel.textContent = 'Oscilloscope — Time Domain (' + capitalize(scopeMode) + ' Amplitude)';
+    el.spectrumLabel.textContent = 'Frequency Spectrum — ' + capitalize(freqMode) + ' Frequency';
+    el.spectrogramLabel.textContent = 'Spectrogram — ' + capitalize(freqMode) + ' Frequency';
+  }
+
+  function redrawWhenIdle() {
+    if (!sampling) drawIdlePanels();
+  }
+
+  // ------------------------------------------------------------------- init
+
+  function handleResize() {
+    if (resizeScheduled) return;
+    resizeScheduled = true;
+    requestAnimationFrame(function () {
+      resizeScheduled = false;
+      if (!sampling) drawIdlePanels();
+    });
+  }
+
+  function init() {
+    el.toggle.addEventListener('click', function () {
+      if (sampling) stopSampling();
+      else beginSampling();
+    });
+
+    el.scopeToggle.addEventListener('click', function () {
+      showScope = !showScope;
+      updateControls();
+      if (showScope) {
+        // The panel was display:none, so its canvas has no size until now.
+        requestAnimationFrame(function () {
+          if (showScope) drawOscilloscopeFrame(timeData);
+        });
+      }
+      redrawWhenIdle();
+    });
+
+    el.scopeScale.addEventListener('click', function () {
+      scopeMode = scopeMode === 'linear' ? 'log' : scopeMode === 'log' ? 'compand' : 'linear';
+      updateControls();
+      if (!sampling) drawOscilloscopeFrame(null);
+    });
+
+    el.scale.addEventListener('click', function () {
+      freqMode = freqMode === 'log' ? 'linear' : 'log';
+      updateControls();
+      redrawWhenIdle();
+    });
+
+    el.windowBtn.addEventListener('click', function () {
+      useWindow = !useWindow;
+      updateControls();
+    });
+
+    el.smooth.addEventListener('click', function () {
+      useSmoothing = !useSmoothing;
+      updateControls();
+    });
+
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) {
+        if (rafId) {
+          cancelAnimationFrame(rafId);
+          rafId = 0;
         }
-        
-        const WIDTH = oscilloscopeCanvas.width;
-        const HEIGHT = oscilloscopeCanvas.height;
-        
-        // Clear the canvas
-        oscilloscopeCtx.fillStyle = 'rgb(0, 0, 0)';
-        oscilloscopeCtx.fillRect(0, 0, WIDTH, HEIGHT);
-        
-        // Set up the line style
-        oscilloscopeCtx.lineWidth = 2;
-        oscilloscopeCtx.strokeStyle = 'rgb(0, 255, 0)';
-        oscilloscopeCtx.beginPath();
-        
-        // Calculate the width of each sample - show only half the samples for longer time window
-        const samplesToShow = analyser.fftSize; // Show the original FFT size worth of samples
-        const sliceWidth = WIDTH / samplesToShow;
-        let x = 0;
-        
-        // Draw the waveform
-        for (let i = 0; i < samplesToShow; i++) {
-            let v = timeDataArray[i] / 128.0; // Convert to 0-2 range
-            
-            // Apply scaling based on mode
-            if (oscilloscopeScaleMode === 'log') {
-                // Log scale: amplify small signals
-                const normalized = Math.abs(v - 1); // 0 to 1 range
-                const scaled = normalized > 0 ? Math.log10(normalized * 9 + 1) : 0; // log10(1) to log10(10)
-                v = 1 + (v > 1 ? scaled : -scaled);
-            } else if (oscilloscopeScaleMode === 'compand') {
-                // Companding: amplify small signals, compress large ones
-                const normalized = v - 1; // -1 to 1 range
-                const abs = Math.abs(normalized);
-                const sign = normalized < 0 ? -1 : 1;
-                // Use a sigmoid-like function for companding
-                const scaled = sign * (1 - Math.exp(-3 * abs)) / (1 + Math.exp(-3 * (abs - 0.5)));
-                v = 1 + scaled;
-            }
-            
-            const y = (v - 1) * (HEIGHT / 2) + HEIGHT / 2; // Center the waveform
-            
-            if (i === 0) {
-                oscilloscopeCtx.moveTo(x, y);
-            } else {
-                oscilloscopeCtx.lineTo(x, y);
-            }
-            
-            x += sliceWidth;
+      } else {
+        if (sampling && audioContext && audioContext.state === 'suspended') {
+          audioContext.resume().catch(function () { /* ignore */ });
         }
-        
-        oscilloscopeCtx.stroke();
+        scheduleFrame();
+      }
+    });
+
+    window.addEventListener('resize', handleResize, { passive: true });
+    window.addEventListener('pagehide', function () {
+      if (sampling) stopSampling();
+    });
+
+    if (typeof ResizeObserver === 'function') {
+      var container = document.querySelector('.main-container');
+      if (container) new ResizeObserver(handleResize).observe(container);
     }
 
-    function updateSpectrum() {
-        if (audioContext.state === 'running') {
-            requestAnimationFrame(updateSpectrum);
-            drawOscilloscope();
-            drawSpectrum();
-        }
-    }
-});
+    updateControls();
+    drawIdlePanels();
+  }
 
-
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();

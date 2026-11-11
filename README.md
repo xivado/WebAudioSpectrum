@@ -1,116 +1,184 @@
 # Web Audio Spectrum Analyzer
 
-A audio spectrum analyzer that visualizes real-time audio input from your microphone using the Web Audio API. This page provides three distinct visualizations to see audio signals in both time and frequency domains.
+A real-time audio visualizer built on the Web Audio API: an oscilloscope, a dBFS
+frequency spectrum and a time–frequency spectrogram, all rendered on plain
+`<canvas>` with no build step and no external dependencies.
 
-See demo here: https://deftio.github.io/WebAudioSpectrum
+This repository is a cleaned-up fork of
+[deftio/WebAudioSpectrum](https://github.com/deftio/WebAudioSpectrum). For a
+primer on time/frequency domains, FFTs, windowing and common waveforms, see
+[AudioSpectra.md](AudioSpectra.md).
 
-For a quick primer on time/frequency domains, FFTs, windowing, and common waveforms, see [AudioSpectra.md](AudioSpectra.md).
+**[Upstream demo](https://deftio.github.io/WebAudioSpectrum/)** (the version in
+this repository needs to be served locally, see below).
 
 ## Features
 
-- **Oscilloscope (Time Domain)**: Shows the waveform of the audio signal over time
-  - Linear, logarithmic, and companding amplitude scaling modes
-  - Uses "classic" green phosphor display style
-- **Real-Time Frequency Spectrum**: Visualizes the frequency content of the audio signal
-  - Linear and logarithmic frequency scaling
-  - Optional Hamming window for improved frequency resolution
-- **Spectrogram (Time-Frequency)**: Shows how the spectrum evolves over time
-  - Waterfall-style display with color-coded intensity
-  - Displays the last 100 frames of spectral data
+- **Oscilloscope (time domain)** — the microphone waveform with linear, log or
+  μ-law companded amplitude mapping, plus a time/sample readout.
+- **Frequency spectrum** — 1024 bins from a 2048-point FFT, displayed as bars
+  on a linear or logarithmic frequency axis and a 0…−90 dBFS amplitude axis.
+- **Spectrogram** — the last 100 spectra as a heatmap. Newest frame at the
+  bottom, grid labels derived from the actual frame timestamps.
+- **Rectangular or Hamming window**, with coherent-gain compensation so the
+  amplitude calibration does not change when you toggle the window.
+- **Temporal smoothing** (EMA) that can be switched off to see raw frames.
+- **High-DPI rendering** (`devicePixelRatio`, capped at 2), debounced resize and
+  orientation changes, and canvases that re-fit themselves.
+- **Correct microphone lifecycle** — stopping releases the microphone and closes
+  the audio context; a denied permission can be retried without reloading.
+- **Accessible controls** — pressed state, focus rings and a live status line.
 
-## How to Use
+## Running it
 
-### Prerequisites
-- A modern web browser that supports HTML5, JavaScript, and the Web Audio API.
-- Microphone access on the device running the analyzer.
+Microphone access requires a secure context: `localhost` or HTTPS. Opening the
+file with `file://` will not work in most browsers.
 
-### Running the Analyzer
-1. Open `index.html` in your browser (or visit the demo link above)
-2. Click the "Start Sampling" button to begin capturing audio from your microphone
-3. Toggle visualizations and settings using the control buttons:
-   - **Show/Hide Oscilloscope**: Toggle the time-domain waveform display
-   - **Scope Scale**: Cycle through Linear/Log/Compand amplitude scaling (when oscilloscope is visible)
-   - **Scale**: Switch between Linear/Log frequency scaling for spectrum and spectrogram
-   - **Window**: Toggle between Rectangular/Hamming windowing functions
+```bash
+cd WebAudioSpectrum
+python3 -m http.server 8000    # or: npm run serve
+# open http://localhost:8000/
+```
 
-## Technical Details
+On a phone, serve from the same network and open `http://<your-computer-ip>:8000/`
+(Chrome treats plain-HTTP LAN origins as insecure, so use the local device or a
+tunnel/HTTPS host if microphone access is blocked).
 
-### Components
-- `index.html`: The HTML file that hosts the application.
-- `audioSpectrum.js`: The JavaScript file that handles audio processing and visualization.
+Click **Start Sampling** and allow microphone access. The oscilloscope is hidden
+by default; **Show Oscilloscope** adds it above the spectrum.
 
+## Controls
 
-### Key Functions
-- `updateSpectrum()`: Main animation loop coordinating all visualizations
-- `drawOscilloscope()`: Renders the time-domain waveform with configurable scaling
-- `drawSpectrum()`: Renders the frequency spectrum using FFT data
-- `drawSpectrogram()`: Updates the time-frequency waterfall display
-- `applyScaling()`: Handles linear/logarithmic frequency axis scaling
+| Button | Behavior |
+| --- | --- |
+| **Start Sampling / Stop Sampling** | Requests the microphone and starts the render loop; stopping stops the media tracks and closes the `AudioContext`. |
+| **Show/Hide Oscilloscope** | Toggles the time-domain panel. |
+| **Scope: Linear / Log / Compand** | Amplitude mapping for the oscilloscope. Log and μ-law companding lift quiet signals; full scale stays at ±1. |
+| **Scale: Linear / Log** | Frequency axis for both the spectrum and the spectrogram (log is base-10 from 20 Hz to Nyquist). |
+| **Window: Rectangular / Hamming** | Analysis window applied before the FFT. Hamming lowers spectral leakage. |
+| **Smooth: Off / On** | EMA smoothing of the spectrum over time (α = 0.8). Off shows the raw frame; the rendering style is unchanged. |
 
-## Understanding the Visualizations
+## Files
 
-### Oscilloscope (Time Domain)
+| File | Purpose |
+| --- | --- |
+| [index.html](index.html) | Page structure, controls, three canvases. |
+| [styles.css](styles.css) | Layout, light/dark theme, responsive canvas sizes. |
+| [spectrum-dsp.js](spectrum-dsp.js) | Pure DSP: radix-2 FFT, Hamming window, dBFS mapping, frame ring buffer, axis math. No DOM. |
+| [audioSpectrum.js](audioSpectrum.js) | Microphone lifecycle, render loop, canvas layout and drawing. |
+| [AudioSpectra.md](AudioSpectra.md) | Background reading: FFTs, windows, harmonics. |
+| [tests/](tests/) | Node tests for the DSP math and a fake-DOM smoke test of the UI. |
+| [dev/original-web-audio-spectrum.html](dev/original-web-audio-spectrum.html) | Early prototype kept for reference. |
+| [singlepage.html](singlepage.html) | Redirect to `index.html`; the old prototype was merged. |
 
-The oscilloscope displays the audio waveform as it varies over time, showing the instantaneous amplitude of the signal. This is the most direct representation of what your microphone "hears."
+## How it works
 
-- **X-axis**: Time (approximately 46 milliseconds of audio at 44.1kHz sampling rate)
-- **Y-axis**: Amplitude (air pressure variations)
-- **Scaling modes**:
-  - **Linear**: Direct representation of the signal amplitude
-  - **Log**: Enhances small signals using logarithmic scaling, useful for viewing quiet sounds
-  - **Compand**: Compresses large amplitudes while expanding small ones, allowing both loud and quiet signals to be visible simultaneously.  For more on companding, visit the companion repo here [companders](https://github.com/deftio/companders)
+### Signal chain
 
-### Frequency Spectrum (Frequency Domain)
+```
+getUserMedia → MediaStreamAudioSourceNode → AnalyserNode (fftSize 2048)
+             → getFloatTimeDomainData → window (optional) → FFT
+             → magnitude → dBFS → 0..255 level → canvas + spectrogram ring
+```
 
-The spectrum analyzer shows which frequencies are present in the audio signal and their relative strengths. This is computed using the Fast Fourier Transform (FFT), which decomposes the time-domain signal into its constituent frequencies.
+The analyser is used only as a source of float time-domain samples. The FFT is
+computed in [spectrum-dsp.js](spectrum-dsp.js) so the window, calibration and
+smoothing are identical in every mode. `smoothingTimeConstant` is set to 0 and
+all temporal smoothing is ours.
 
-- **X-axis**: Frequency (0 Hz to ~22 kHz, half the sampling rate)
-- **Y-axis**: Magnitude (strength of each frequency component)
-- **Scaling modes**:
-  - **Linear frequency**: Equal spacing between frequencies (e.g., 100Hz, 200Hz, 300Hz...)
-  - **Log frequency**: Logarithmic spacing that better represents how we perceive pitch (each octave gets equal space)
+### Calibration
 
-### Spectrogram (Time-Frequency Domain)
+A full-scale sine reads 0 dBFS; the bottom of the plot is −90 dBFS. The mapping
+is `20·log10(magnitude / (N/2))`, clamped to the display range. Because the
+Hamming window is normalized to unit mean gain, switching windows changes
+leakage, not the level of a steady tone.
 
-The spectrogram combines time and frequency information, showing how the frequency content evolves over time. Think of it as a "musical score" of the audio, where you can see both what frequencies are present and when they occur.
+### Spectrogram timing
 
-- **X-axis**: Frequency (same as the spectrum analyzer)
-- **Y-axis**: Time (newest data at bottom, scrolling upward)
-- **Color**: Intensity (darker = stronger frequency component)
+Every rendered frame is pushed into a 100-frame ring buffer together with its
+`performance.now()` timestamp. Rows are ordered oldest (top) to newest (bottom),
+and the time axis labels are computed from the timestamps of the frames actually
+on screen. At ~60 fps the buffer therefore covers roughly 1.5–2 seconds; the
+axis shows the real value. Frame rate does not affect the labels.
 
-## Windowing and Signal Processing
+The heatmap is built in an `ImageData` buffer at CSS resolution (100 frames ×
+1024 bins would otherwise cost ~100k `fillRect` calls per frame) and drawn with
+nearest-neighbour scaling.
 
-### Why Windowing?
+### FFT and resolution
 
-When we take a chunk of audio for FFT analysis, we're essentially "cutting out" a piece of a continuous signal. This abrupt cutting creates artificial high-frequency components (spectral leakage) that weren't in the original signal. Windowing functions taper the signal smoothly to zero at the edges, reducing these artifacts.
+- FFT size: 2048 samples, 1024 displayed bins.
+- Bin spacing: `sampleRate / 2048` ≈ 21.5 Hz at 44.1 kHz, 23.4 Hz at 48 kHz.
+- Time window: `2048 / sampleRate` ≈ 46 ms at 44.1 kHz, 43 ms at 48 kHz.
+- Larger FFT sizes improve frequency resolution but blur transients; smaller
+  sizes do the opposite.
 
-### Window Functions
+### Windowing
 
-- **Rectangular Window**: No windowing - the signal is cut abruptly. This preserves the best frequency resolution but has the most spectral leakage.
-- **Hamming Window**: Applies a raised cosine taper to the signal edges. This reduces spectral leakage at the cost of slightly reduced frequency resolution. The Hamming window follows the formula: `w(n) = 0.54 - 0.46 * cos(2πn/(N-1))`
+Cutting a signal into 2048-sample blocks is itself a rectangular window. If the
+block does not contain a whole number of cycles, energy spreads into nearby
+bins (spectral leakage). The Hamming window tapers the block edges:
 
-### FFT Size and Resolution
+```
+w(n) = 0.54 − 0.46·cos(2πn/(N−1))
+```
 
-The analyzer uses an FFT size of 2048 samples, which provides:
-- **Frequency resolution**: ~21.5 Hz bins at 44.1kHz sampling rate (44100/2048)
-- **Time resolution**: ~46 ms window duration (2048/44100)
+The implementation divides by the window's mean (coherent gain) so a steady tone
+keeps its level. The trade-off is a slightly wider main lobe, i.e. a little less
+frequency resolution.
 
-There's always a trade-off: larger FFT sizes give better frequency resolution but poorer time resolution, while smaller FFT sizes do the opposite.
+## Testing
 
-### Amplitude Scaling
+```bash
+npm test
+```
 
-Different scaling modes help visualize different aspects of the signal:
-- **Linear amplitude**: Shows true relative strengths but can make quiet signals invisible
-- **Logarithmic amplitude**: Compresses the dynamic range, making quiet signals more visible (useful for audio work where we care about signals across many orders of magnitude)
-- **Companding**: A hybrid approach that provides good visibility for both loud and quiet signals
+The suite uses Node's built-in test runner:
 
-## Contributing
+- **DSP tests** — FFT against a naive DFT, window normalization, dBFS levels,
+  smoothing behavior, leakage reduction, ring-buffer wrap-around, axis mapping,
+  companding curves.
+- **UI smoke test** — loads both scripts in a fake DOM and exercises start, stop,
+  permission denial, every toggle, resize and visibility changes. Canvas calls
+  and the spectrogram `ImageData` are inspected, including a check that the
+  newest frame is at the bottom.
 
-Contributions to the project are welcome! Please adhere to the following guidelines:
-- Fork the repository and create your feature branch.
-- Ensure your code adheres to the existing style to maintain consistency.
-- Submit a pull request with a clear description of your changes.
+No browser or network access is required.
+
+## Browser support
+
+Chromium-based browsers, Firefox and Safari (current versions) on desktop and
+mobile. Requirements: `getUserMedia`, Web Audio API, typed arrays, `async`/`await`
+and `ResizeObserver` (optional; resize falls back to the `resize` event).
+
+## Known limitations
+
+- The oscilloscope is not trigger-synchronized, so the waveform can drift
+  horizontally at low frame rates.
+- Log-frequency bars use a minimum width of one pixel, so the lowest bins
+  overlap visually.
+- The spectrogram rows are spaced by frame index, not by exact arrival time;
+  jitter in `requestAnimationFrame` can shift rows by a fraction of a frame.
+- No recording, export or peak-frequency readout yet (see
+  [dev/roadmap.md](dev/roadmap.md)).
+
+## Changes in this fork
+
+- Merged the separate `singlepage.html` implementation into one analyzer.
+- Unified the spectrum pipeline so windowing no longer changes the dBFS
+  calibration or smoothing, and "Smooth: Off" really shows raw data.
+- Fixed the spectrogram direction and replaced the guessed time span with
+  timestamp-derived labels.
+- Moved axis labels out of the data area and scaled amplitudes to the plot
+  height (no more clipped bars); added decibel axis labels.
+- Added device-pixel-ratio rendering, resize handling and debounced redraws.
+- Precomputed FFT twiddle factors, removed per-frame allocations and replaced
+  per-bin `fillRect` spectrogram drawing with `ImageData`.
+- Fixed microphone teardown, retry after denied permission, and paused the loop
+  when the tab is hidden.
+- Removed the unused Bootstrap dependency and inline CSS.
+- Added the DSP/UI split and the Node test suite.
 
 ## License
 
-This project is released under the MIT License. See the `LICENSE` file for more information.
+MIT. See [LICENSE.txt](LICENSE.txt). Original work © M A Chatterjee (deftio).

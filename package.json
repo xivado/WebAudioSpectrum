@@ -1,0 +1,11 @@
+{
+  "name": "web-audio-spectrum",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Pure JavaScript oscilloscope, dBFS spectrum and spectrogram visualizer using the Web Audio API",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test tests/dsp.test.js tests/ui.test.js",
+    "serve": "python3 -m http.server 8000"
+  }
+}

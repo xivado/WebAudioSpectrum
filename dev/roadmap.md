@@ -1,112 +1,115 @@
 # WebAudioSpectrum Development Roadmap
 
-## Documentation Improvements
+Status after the 2026 cleanup: the analyzer is now a single implementation with a
+pure DSP module, tests and a documented signal chain. Items below are grouped by
+area; `[x]` means done in this repository, `[ ]` means still open.
 
-### README.md Enhancements
-- [ ] Add Prerequisites section with browser compatibility matrix (Chrome, Firefox, Edge)
-- [ ] Note HTTPS/localhost requirement for microphone access
-- [ ] Add screenshots of spectrum analyzer and spectrogram visualizations
-- [ ] Clarify difference between index.html and singlepage.html implementations
-- [ ] Expand usage instructions with interpretation guide for visualizations
-- [ ] Document technical specifications (FFT size: 2048, frequency range, sampling rate)
-- [ ] Add troubleshooting section for common issues:
-  - Microphone permission errors
-  - Browser security policies
-  - AudioContext autoplay restrictions
-- [ ] Include performance considerations and optimal browser settings
+## Documentation
 
-## UI/UX Improvements
+### README.md
 
-### Visual Design
-- [ ] Standardize button styling - all buttons should use consistent Bootstrap classes
-- [ ] Implement responsive canvas sizing instead of fixed vh units
-- [ ] Optimize mobile layout - reduce body margins and maximize canvas space
-- [ ] Implement professional color scheme options:
-  - Scientific (blue-green gradient)
-  - Heat map (current red-based)
-  - Grayscale for accessibility
+- [x] Prerequisites and secure-context (HTTPS/localhost) requirement
+- [x] Browser compatibility note
+- [x] Clarify the role of `index.html` vs the retired `singlepage.html`
+- [x] Technical specifications (FFT size, bin spacing, window length)
+- [x] Explain dBFS calibration, windowing and smoothing behavior
+- [x] Document spectrogram direction and timestamp-derived time axis
+- [x] Testing instructions
+- [ ] Screenshots of the three visualizations
+- [ ] Troubleshooting matrix for permission and autoplay errors
 
-### Functional Enhancements
-- [ ] Update button labels to show current state (e.g., "Scale: Linear" vs "Scale: Logarithmic")
-- [ ] Add loading spinner during microphone permission request
-- [ ] Implement user-friendly error messages with recovery suggestions
-- [ ] Add axis labels and frequency markers to canvases
-- [ ] Include decibel scale on spectrum display
-- [ ] Add time scale to spectrogram
+## UI/UX
 
-## Technical Improvements
+### Visual design
 
-### Bug Fixes
-- [ ] Implement proper canvas scaling for retina displays using devicePixelRatio
-- [ ] Add proper HTML5 semantic structure and lang attribute
-- [ ] Remove unnecessary Bootstrap JS bundle (only using CSS)
-- [ ] Fix potential memory leaks in spectrogram data management
+- [x] Consistent button styling (single stylesheet, no Bootstrap)
+- [x] Responsive canvas sizing instead of fixed `vh` units
+- [x] Compact mobile layout
+- [x] Light/dark theme via `prefers-color-scheme`
+- [ ] Selectable color maps (scientific / heat / grayscale)
 
-### Performance Optimizations
-- [ ] Implement debouncing for window resize events
-- [ ] Add FPS counter and performance monitoring
-- [ ] Optimize canvas drawing with offscreen buffers
-- [ ] Add option to reduce FFT size for lower-end devices
+### Functional
+
+- [x] Buttons show current state ("Scale: Log", "Window: Hamming", …)
+- [x] Busy state while the microphone request is pending
+- [x] Human-readable microphone errors with recovery hints
+- [x] Axis labels and frequency markers on all panels
+- [x] Decibel scale on the spectrum
+- [x] Time scale on the spectrogram (from real frame timestamps)
+- [ ] Peak-frequency readout
+- [ ] Layout presets (spectrum only / spectrogram only)
+
+## Technical
+
+### Correctness
+
+- [x] One FFT path, so the window toggle cannot change calibration or smoothing
+- [x] Amplitude mapped to plot height (bars no longer clip)
+- [x] Y-axis labels drawn outside the data area, after the bars
+- [x] Spectrogram ordering: newest at the bottom, oldest at the top
+- [x] Spectrogram time span measured rather than assumed
+- [x] Microphone tracks stopped and `AudioContext` closed on stop
+- [x] Retry after a denied permission without reloading
+- [x] Render loop paused while the tab is hidden
+- [x] High-DPI canvas backing store (`devicePixelRatio`, capped at 2)
+- [x] Debounced resize handling
+- [ ] Trigger-synchronized oscilloscope (stable waveform)
+
+### Performance
+
+- [x] Precomputed twiddle factors and bit-reversal table
+- [x] No per-frame typed-array allocations in the hot path
+- [x] Spectrogram rendered via `ImageData` instead of per-bin `fillRect`
+- [x] Fixed-size frame ring buffer (no unbounded growth or `shift()` churn)
+- [ ] FPS counter / performance panel
+- [ ] Optional lower FFT size for low-end devices
+- [ ] WebGL or Web Worker rendering path
 
 ### Accessibility
-- [ ] Add ARIA labels to all interactive elements
-- [ ] Implement keyboard navigation (spacebar for start/stop, arrow keys for settings)
-- [ ] Add alternative data representation (numerical peak frequencies)
-- [ ] Include screen reader announcements for state changes
 
-### Code Quality
-- [ ] Refactor inline styles to external CSS file
-- [ ] Implement module pattern to avoid global scope pollution
-- [ ] Extract magic numbers to configuration constants
-- [ ] Add JSDoc comments for all functions
-- [ ] Implement error boundaries and graceful degradation
+- [x] ARIA labels and `aria-pressed` on controls
+- [x] Live status announcements
+- [x] Visible focus indicators
+- [ ] Keyboard shortcuts (space to start/stop, arrows for settings)
+- [ ] Numeric alternative to the visualizations (peak bins)
 
-## Feature Integration: Oscilloscope
+### Code quality
+
+- [x] External stylesheet (no inline CSS)
+- [x] Module pattern (IIFE UI, UMD DSP module)
+- [x] Central `CONFIG` for FFT size, dB range, frame count, DPR cap
+- [x] DSP split from DOM/audio code and unit-tested
+- [x] Fake-DOM smoke test for the UI
+- [ ] Full JSDoc coverage
+- [ ] ESLint configuration
+- [ ] GitHub Actions running `npm test`
+
+## Retired
+
+- [x] Merge the oscilloscope from `singlepage.html` into the unified page
+- [x] Replace `singlepage.html` with a redirect to `index.html`
+- [x] Remove the unused Bootstrap dependency
+- [x] Remove the duplicated AudioWorklet prototype code
+
+## Future features
 
 ### Analysis
-The singlepage.html contains a valuable oscilloscope visualization that's missing from the main index.html implementation. This provides time-domain visualization that complements the frequency-domain displays.
 
-### Implementation Plan: Unified Interface
-- Merge oscilloscope feature from singlepage.html into index.html
-- Add oscilloscope as the top canvas (time-domain view)
-- Include toggle button to show/hide oscilloscope for space efficiency
-- Maintain compact layout to fit above the fold
-- Benefits:
-  - Single, feature-complete implementation
-  - Better user experience
-  - Easier maintenance
-  - Complete audio visualization suite in one page
+- [ ] Peak frequency detection and labels
+- [ ] Note detection (musical pitch)
+- [ ] Frequency-band levels (bass / mid / treble)
+- [ ] Audio recording and playback
+- [ ] Waterfall option for the spectrogram
 
-### Implementation Priority
-1. **Phase 1**: Add oscilloscope to index.html with toggle button
-2. **Phase 2**: Improve UI aesthetics while maintaining compactness
-3. **Phase 3**: Optimize performance and add accessibility features
+### Customization
 
-## Future Features
-
-### Advanced Audio Analysis
-- [ ] Peak frequency detection and labeling
-- [ ] Note detection (musical note identification)
-- [ ] Frequency band analysis (bass, mid, treble levels)
-- [ ] Audio recording and playback capabilities
-- [ ] Waterfall display option for spectrogram
-
-### User Customization
 - [ ] Adjustable FFT size selector
-- [ ] Custom frequency range zoom
-- [ ] Color theme picker
-- [ ] Layout customization (vertical/horizontal arrangements)
+- [ ] Frequency-range zoom
+- [ ] Color-theme picker
 - [ ] Export visualizations as images
 
-### Technical Enhancements
-- [ ] WebGL rendering for better performance
-- [ ] Web Workers for FFT processing
-- [ ] PWA support for offline usage
-- [ ] MIDI input support for instrument analysis
+### Platform
 
-## Development Workflow Improvements
-- [ ] Add ESLint configuration
-- [ ] Implement GitHub Actions for deployment
-- [ ] Add simple test suite for core functionality
-- [ ] Create development server script with hot reload
-- [ ] Add contributing guidelines
+- [ ] PWA / offline installation
+- [ ] MIDI input for instrument analysis
+- [ ] Development server with hot reload
