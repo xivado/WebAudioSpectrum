@@ -4,13 +4,15 @@ A real-time audio visualizer built on the Web Audio API: an oscilloscope, a dBFS
 frequency spectrum and a time–frequency spectrogram, all rendered on plain
 `<canvas>` with no build step and no external dependencies.
 
-This repository is a cleaned-up fork of
-[deftio/WebAudioSpectrum](https://github.com/deftio/WebAudioSpectrum). For a
-primer on time/frequency domains, FFTs, windowing and common waveforms, see
-[AudioSpectra.md](AudioSpectra.md).
+**Live demo:** <https://xivado.github.io/WebAudioSpectrum/> — served over HTTPS by
+GitHub Pages, so the microphone works on desktop and mobile. Allow microphone
+access when the browser asks.
 
-**[Upstream demo](https://deftio.github.io/WebAudioSpectrum/)** (the version in
-this repository needs to be served locally, see below).
+This repository is a cleaned-up fork of
+[deftio/WebAudioSpectrum](https://github.com/deftio/WebAudioSpectrum); the
+upstream demo still runs the older version. For a primer on time/frequency
+domains, FFTs, windowing and common waveforms, see
+[AudioSpectra.md](AudioSpectra.md).
 
 ## Features
 
@@ -29,10 +31,11 @@ this repository needs to be served locally, see below).
   the audio context; a denied permission can be retried without reloading.
 - **Accessible controls** — pressed state, focus rings and a live status line.
 
-## Running it
+## Running it locally
 
-Microphone access requires a secure context: `localhost` or HTTPS. Opening the
-file with `file://` will not work in most browsers.
+The live demo above is the easiest entry point. To run your own copy, serve the
+directory over `localhost` (a secure context) — opening the file with `file://`
+will not grant microphone access in most browsers.
 
 ```bash
 cd WebAudioSpectrum
